@@ -6,6 +6,6 @@ __pycache__/
 .env
 .env.local
 
-# Box tokens and exports
+# Box tokens and local exports
 .box_tokens.json
 *.xlsx
