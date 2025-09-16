@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local env and config
+.env
+.env.local
+
+# Box tokens and exports
+.box_tokens.json
+*.xlsx
