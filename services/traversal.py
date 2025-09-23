@@ -1,5 +1,8 @@
+# services/traversal.py
 # -*- coding: utf-8 -*-
 import os
+from typing import List, Dict
+from pathlib import Path
 from boxsdk import Client
 
 # Common video file extensions (lowercase)
@@ -8,18 +11,57 @@ VIDEO_EXTENSIONS = {
     ".mpeg", ".mpg", ".3gp", ".3g2", ".ts", ".m2ts", ".mts", ".ogv",
 }
 
-def iterate_tree(client: Client, start_folder_id: str, start_folder_name: str):
+def _safe_get_ancestors(folder_info) -> List[str]:
     """
-    Return rows for video files located in the selected folder and any of its subfolders.
-    Each row: {'path': full_path_including_filename, 'file_name': name, 'tag': ''}
-
-    - Includes files at the selected folder level and any depth below.
-    - Filters by VIDEO_EXTENSIONS (case-insensitive).
-    - Traverses with pagination (limit=1000) to handle large folders.
+    Extract ancestor names from Box folder.path_collection, skipping None values.
+    Returns names excluding the current folder; order is from root toward the folder.
     """
-    rows = []
+    names: List[str] = []
+    pc = getattr(folder_info, "path_collection", None)
+    if not pc:
+        return names
 
-    def walk(folder_id: str, path_prefix: str, depth: int):
+    # In SDK objects, path_collection can be dict-like or have an 'entries' attribute
+    entries = pc.get("entries") if isinstance(pc, dict) else getattr(pc, "entries", None)
+    if not entries:
+        return names
+
+    for e in entries:
+        nm = e.get("name") if isinstance(e, dict) else getattr(e, "name", None)
+        if nm:
+            names.append(nm)
+    return names
+
+def _full_folder_path(client: Client, folder_id: str) -> str:
+    """
+    Build absolute path beginning with 'All Files' for any Box folder ID using path_collection.
+    """
+    if str(folder_id) == "0":
+        return "All Files"
+
+    # Request only fields needed to build absolute path
+    info = client.folder(folder_id=folder_id).get(fields=["name", "path_collection"])
+    ancestors = _safe_get_ancestors(info)
+
+    # Ensure 'All Files' is the first element
+    parts = ancestors[:] if ancestors else []
+    if not parts or parts != "All Files":
+        parts = ["All Files"] + parts
+    parts.append(getattr(info, "name", "") or "")
+
+    parts = [p for p in parts if p]
+    return "/".join(parts)
+
+def iterate_tree(client: Client, start_folder_id: str, _start_folder_name_ignored: str) -> List[Dict[str, str]]:
+    """
+    Return rows for video files located in the selected folder and any of its subfolders,
+    with each 'path' set to the full absolute Box path starting at 'All Files'.
+    Each row: {'path': full_path_including_filename, 'file_name': name, 'tag': ''}.
+    """
+    rows: List[Dict[str, str]] = []
+    base_prefix = _full_folder_path(client, start_folder_id)
+
+    def walk(folder_id: str, path_prefix: str):
         limit = 1000
         offset = 0
         while True:
@@ -31,23 +73,20 @@ def iterate_tree(client: Client, start_folder_id: str, start_folder_name: str):
             for item in batch:
                 if item.type == "folder":
                     folder_path = f"{path_prefix}/{item.name}"
-                    # Recurse into subfolder
-                    walk(item.id, folder_path, depth + 1)
+                    walk(item.id, folder_path)
                 elif item.type == "file":
-                    # Include files at any depth (including selected folder)
-                    ext = os.path.splitext(item.name)[1].lower()
+                    # Safe extension extraction: Path.suffix yields '' when no extension
+                    ext = Path(item.name or "").suffix.lower()
                     if ext in VIDEO_EXTENSIONS:
                         file_path = f"{path_prefix}/{item.name}"
                         rows.append({"path": file_path, "file_name": item.name, "tag": ""})
                 else:
-                    # skip other types (e.g., web_link)
+                    # skip other item types (e.g., web_link)
                     pass
 
             if len(batch) < limit:
                 break
             offset += len(batch)
 
-    # Start from the selected folder (no folder rows added)
-    start_path = f"/{start_folder_name}"
-    walk(start_folder_id, start_path, depth=0)
+    walk(start_folder_id, base_prefix)
     return rows
